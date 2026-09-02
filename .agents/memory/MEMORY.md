@@ -1,0 +1,1 @@
+- [OpenAPI integer compatibility](openapi-zod-compatibility.md) — avoid top-level integer schemas when the workspace Zod generator emits unsupported helpers.

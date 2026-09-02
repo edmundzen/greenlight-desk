@@ -1,36 +1,43 @@
-# [Project name]
+# Greenlight Desk
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Greenlight Desk helps producers turn screenplay drafts into traceable, reviewable coverage with Google Gemini.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/api-server run dev` — run the Python FastAPI service (port 8080)
+- `pnpm --filter @workspace/greenlight-desk run dev` — run the React producer workspace
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required secret: `GEMINI_API_KEY` — Google Gemini API key, stored in Replit Secrets
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
+- pnpm workspaces, Node.js 24, Python 3.13
+- API: FastAPI + Uvicorn, google-genai, pypdf
+- Persistence: SQLite for screenplay metadata, trace state, coverage, and decisions
+- Frontend: React + Vite + TanStack Query
 - API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Build: Vite
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `main.py` — FastAPI service, Gemini analysis, trace orchestration, and decision gate
+- `artifacts/greenlight-desk/src/App.tsx` — producer workspace UI
+- `artifacts/greenlight-desk/src/index.css` — Greenlight Desk visual language
+- `lib/api-spec/openapi.yaml` — API contract source of truth
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- The analysis job runs asynchronously so the client can poll the detail endpoint and reveal trace events progressively.
+- Coverage and key art are generated only through the Google Gemini SDK; missing credentials fail explicitly.
+- Decisions are rejected by the API until a ready report exists, keeping approval as a hard human gate.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Upload PDF or TXT screenplay drafts.
+- Review incremental agent trace events, structured coverage, and Gemini-generated key art.
+- Approve or reject coverage after the report is ready.
 
 ## User preferences
 

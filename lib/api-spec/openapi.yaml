@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: coverage
+    description: Screenplay coverage operations
 paths:
   /healthz:
     get:
@@ -24,7 +26,86 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /screenplays:
+    get:
+      operationId: listScreenplays
+      tags: [coverage]
+      summary: List recent screenplays
+      responses:
+        "200":
+          description: Recent screenplay analyses
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ScreenplaySummary"
+  /screenplays/analyze:
+    post:
+      operationId: analyzeScreenplay
+      tags: [coverage]
+      summary: Analyze a screenplay with Gemini
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScreenplayAnalyzeInput"
+      responses:
+        "202":
+          description: Analysis started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisJob"
+        "400":
+          description: Invalid screenplay input
+  /screenplays/{screenplayId}:
+    get:
+      operationId: getScreenplay
+      tags: [coverage]
+      summary: Get screenplay coverage and trace
+      parameters:
+        - $ref: "#/components/parameters/ScreenplayId"
+      responses:
+        "200":
+          description: Screenplay detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScreenplayDetail"
+        "404":
+          description: Screenplay not found
+  /screenplays/{screenplayId}/decision:
+    post:
+      operationId: decideScreenplay
+      tags: [coverage]
+      summary: Approve or reject screenplay coverage
+      parameters:
+        - $ref: "#/components/parameters/ScreenplayId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DecisionInput"
+      responses:
+        "200":
+          description: Updated screenplay decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScreenplayDetail"
+        "409":
+          description: Coverage is not ready for a decision
 components:
+  parameters:
+    ScreenplayId:
+      name: screenplayId
+      in: path
+      required: true
+      schema:
+        type: string
   schemas:
     HealthStatus:
       type: object
@@ -33,4 +114,118 @@ components:
           type: string
       required:
         - status
+    ScreenplayAnalyzeInput:
+      type: object
+      required: [fileName, mimeType, content]
+      properties:
+        fileName:
+          type: string
+          minLength: 1
+        mimeType:
+          type: string
+          enum: [text/plain, application/pdf]
+        content:
+          type: string
+          description: Plain text or base64-encoded PDF content
+          minLength: 1
+    AnalysisJob:
+      type: object
+      required: [screenplayId, status]
+      properties:
+        screenplayId:
+          type: string
+        status:
+          type: string
+          enum: [queued, analyzing, complete, failed]
+    ScreenplaySummary:
+      type: object
+      required: [id, fileName, status, createdAt]
+      properties:
+        id:
+          type: string
+        fileName:
+          type: string
+        status:
+          type: string
+          enum: [queued, analyzing, ready, approved, rejected, failed]
+        recommendation:
+          type: [string, "null"]
+          enum: [Pass, Consider, Recommend, null]
+        createdAt:
+          type: string
+    TraceEvent:
+      type: object
+      required: [id, label, detail, status, createdAt]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        detail:
+          type: string
+        status:
+          type: string
+          enum: [complete, active, pending, error]
+        createdAt:
+          type: string
+    CoverageReport:
+      type: object
+      required: [logline, synopsis, strengths, weaknesses, comparableTitles, recommendation]
+      properties:
+        logline:
+          type: string
+        synopsis:
+          type: string
+        strengths:
+          type: array
+          items: { type: string }
+        weaknesses:
+          type: array
+          items: { type: string }
+        comparableTitles:
+          type: array
+          items:
+            type: object
+            required: [title, reason]
+            properties:
+              title: { type: string }
+              reason: { type: string }
+        recommendation:
+          type: string
+          enum: [Pass, Consider, Recommend]
+    ScreenplayDetail:
+      type: object
+      required: [id, fileName, mimeType, status, createdAt, trace, report, keyArtUrl, decision]
+      properties:
+        id: { type: string }
+        fileName: { type: string }
+        mimeType: { type: string }
+        status:
+          type: string
+          enum: [queued, analyzing, ready, approved, rejected, failed]
+        createdAt: { type: string }
+        pageCount:
+          type: [number, "null"]
+        report:
+          oneOf:
+            - $ref: "#/components/schemas/CoverageReport"
+            - type: "null"
+        trace:
+          type: array
+          items:
+            $ref: "#/components/schemas/TraceEvent"
+        keyArtUrl:
+          type: [string, "null"]
+        decision:
+          type: [string, "null"]
+          enum: [approved, rejected, null]
+        decisionAt:
+          type: [string, "null"]
+    DecisionInput:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [approved, rejected]
 

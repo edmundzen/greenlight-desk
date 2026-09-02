@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Greenlight Desk"
+description = "A producer-focused screenplay coverage assistant that analyzes PDF or plain-text scripts with Google Gemini, streams an agent trace, generates key art, and requires human approval before finalizing coverage."
+version = "1.0.0"
+id = "artifacts/greenlight-desk"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19809
+
+[services.development]
+run = "pnpm --filter @workspace/greenlight-desk run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/greenlight-desk", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/greenlight-desk/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19809"
+BASE_PATH = "/"
