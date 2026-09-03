@@ -103,6 +103,17 @@ def trace_item(label: str, detail: str, status: str = "complete") -> dict[str, A
     }
 
 
+def initial_trace() -> list[dict[str, Any]]:
+    return [
+        trace_item("Queued screenplay", "Waiting for the coverage agent", "active"),
+        trace_item("Read script", "Pending", "pending"),
+        trace_item("Mapped story world", "Pending", "pending"),
+        trace_item("Checked tone and genre", "Pending", "pending"),
+        trace_item("Drafted recommendation", "Pending", "pending"),
+        trace_item("Generated key art", "Pending", "pending"),
+    ]
+
+
 def parse_source(payload: ScreenplayAnalyzeInput) -> tuple[str, int | None]:
     if payload.mimeType == "text/plain":
         text = payload.content
@@ -337,14 +348,7 @@ async def analyze_screenplay(payload: ScreenplayAnalyzeInput) -> dict[str, str]:
     if not source_text.strip():
         raise HTTPException(status_code=400, detail="The screenplay did not contain readable text.")
     screenplay_id = str(uuid.uuid4())
-    initial_trace = [
-        trace_item("Queued screenplay", "Waiting for the coverage agent", "active"),
-        trace_item("Read script", "Pending", "pending"),
-        trace_item("Mapped story world", "Pending", "pending"),
-        trace_item("Checked tone and genre", "Pending", "pending"),
-        trace_item("Drafted recommendation", "Pending", "pending"),
-        trace_item("Generated key art", "Pending", "pending"),
-    ]
+    initial_trace = initial_trace()
     import json
 
     with db() as connection:
@@ -366,6 +370,31 @@ async def get_screenplay(screenplay_id: str) -> dict[str, Any]:
     if not record:
         raise HTTPException(status_code=404, detail="Screenplay not found.")
     return record
+
+
+@app.post("/api/screenplays/{screenplay_id}/restart", status_code=202)
+async def restart_screenplay(screenplay_id: str) -> dict[str, str]:
+    record = load_record(screenplay_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Screenplay not found.")
+    if record["status"] != "failed":
+        raise HTTPException(status_code=409, detail="Only failed analyses can be restarted.")
+    if screenplay_id in jobs:
+        raise HTTPException(status_code=409, detail="This analysis is already running.")
+
+    import json
+
+    update_record(
+        screenplay_id,
+        status="analyzing",
+        report=None,
+        keyArtUrl=None,
+        decision=None,
+        decision_at=None,
+    )
+    save_trace(screenplay_id, initial_trace(), "analyzing")
+    jobs[screenplay_id] = asyncio.create_task(run_analysis(screenplay_id))
+    return {"screenplayId": screenplay_id, "status": "analyzing"}
 
 
 @app.post("/api/screenplays/{screenplay_id}/decision")

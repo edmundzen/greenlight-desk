@@ -358,6 +358,77 @@ export function useGetScreenplay<TData = Awaited<ReturnType<typeof getScreenplay
 
 
 
+export const getRestartScreenplayUrl = (screenplayId: string,) => {
+
+
+
+
+  return `/api/screenplays/${screenplayId}/restart`
+}
+
+/**
+ * @summary Restart a failed screenplay analysis
+ */
+export const restartScreenplay = async (screenplayId: string, options?: Parameters<typeof customFetch>[1]): Promise<AnalysisJob> => {
+
+  return customFetch<AnalysisJob>(getRestartScreenplayUrl(screenplayId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getRestartScreenplayMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof restartScreenplay>>, TError,{screenplayId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof restartScreenplay>>, TError,{screenplayId: string}, TContext> => {
+
+const mutationKey = ['restartScreenplay'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof restartScreenplay>>, {screenplayId: string}> = (props) => {
+          const {screenplayId} = props ?? {};
+
+          return  restartScreenplay(screenplayId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RestartScreenplayMutationResult = NonNullable<Awaited<ReturnType<typeof restartScreenplay>>>
+
+    export type RestartScreenplayMutationError = ErrorType<void>
+
+    /**
+ * @summary Restart a failed screenplay analysis
+ */
+export const useRestartScreenplay = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof restartScreenplay>>, TError,{screenplayId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof restartScreenplay>>,
+        TError,
+        {screenplayId: string},
+        TContext
+      > => {
+      return useMutation(getRestartScreenplayMutationOptions(options));
+    }
+
 export const getDecideScreenplayUrl = (screenplayId: string,) => {
 
 

@@ -88,6 +88,19 @@ export const GetScreenplayResponse = zod.object({
 
 
 /**
+ * @summary Restart a failed screenplay analysis
+ */
+export const RestartScreenplayParams = zod.object({
+  "screenplayId": zod.coerce.string()
+})
+
+export const RestartScreenplayResponse = zod.object({
+  "screenplayId": zod.string(),
+  "status": zod.enum(['queued', 'analyzing', 'complete', 'failed'])
+})
+
+
+/**
  * @summary Approve or reject screenplay coverage
  */
 export const DecideScreenplayParams = zod.object({

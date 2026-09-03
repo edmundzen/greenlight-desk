@@ -76,6 +76,24 @@ paths:
                 $ref: "#/components/schemas/ScreenplayDetail"
         "404":
           description: Screenplay not found
+  /screenplays/{screenplayId}/restart:
+    post:
+      operationId: restartScreenplay
+      tags: [coverage]
+      summary: Restart a failed screenplay analysis
+      parameters:
+        - $ref: "#/components/parameters/ScreenplayId"
+      responses:
+        "202":
+          description: Analysis restarted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisJob"
+        "404":
+          description: Screenplay not found
+        "409":
+          description: Screenplay is not in a failed state
   /screenplays/{screenplayId}/decision:
     post:
       operationId: decideScreenplay
