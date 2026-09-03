@@ -28,8 +28,8 @@ app.add_middleware(
 )
 
 DB_PATH = os.getenv("GREENLIGHT_DB_PATH", "greenlight.db")
-IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
-TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.0-flash")
+IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.5-flash")
 jobs: dict[str, asyncio.Task[None]] = {}
 
 

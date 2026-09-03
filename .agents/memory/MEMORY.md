@@ -1,1 +1,2 @@
 - [OpenAPI integer compatibility](openapi-zod-compatibility.md) — avoid top-level integer schemas when the workspace Zod generator emits unsupported helpers.
+- [Gemini model availability](gemini-model-availability.md) — verify live model listings; retired IDs and per-model image quotas can differ for the same key.
