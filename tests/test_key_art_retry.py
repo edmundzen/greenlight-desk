@@ -8,6 +8,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -45,7 +46,6 @@ class KeyArtRetryApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
-        main.key_art_retries_in_progress.clear()
         self.db_path_patch.stop()
         self.temp_dir.cleanup()
 
@@ -199,6 +199,131 @@ class KeyArtRetryApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(call_count, 1)
+
+    def test_independent_claim_owners_share_one_database_lease(self) -> None:
+        self.insert_screenplay("shared-lease")
+
+        self.assertTrue(main.claim_key_art_retry("shared-lease", "server-a"))
+        self.assertFalse(main.claim_key_art_retry("shared-lease", "server-b"))
+
+        main.release_key_art_retry("shared-lease", "server-a")
+        self.assertTrue(main.claim_key_art_retry("shared-lease", "server-b"))
+
+    def test_expired_claim_can_be_recovered_without_old_owner_releasing_it(self) -> None:
+        self.insert_screenplay("abandoned-lease")
+        claimed_at = datetime.now(timezone.utc) - main.KEY_ART_CLAIM_TTL - timedelta(
+            seconds=1
+        )
+
+        self.assertTrue(
+            main.claim_key_art_retry(
+                "abandoned-lease", "abandoned-server", claimed_at=claimed_at
+            )
+        )
+        self.assertTrue(main.claim_key_art_retry("abandoned-lease", "replacement-server"))
+
+        main.release_key_art_retry("abandoned-lease", "abandoned-server")
+        self.assertFalse(main.claim_key_art_retry("abandoned-lease", "third-server"))
+
+    def test_delayed_request_rechecks_saved_art_after_claiming(self) -> None:
+        self.insert_screenplay("stale-precheck")
+        first_claim_blocked = threading.Event()
+        allow_first_claim = threading.Event()
+        claim_call_count = 0
+        generation_count = 0
+        count_lock = threading.Lock()
+        original_claim = main.claim_key_art_retry
+
+        def delay_first_claim(screenplay_id: str, owner_id: str) -> bool:
+            nonlocal claim_call_count
+            with count_lock:
+                claim_call_count += 1
+                call_number = claim_call_count
+            if call_number == 1:
+                first_claim_blocked.set()
+                self.assertTrue(allow_first_claim.wait(timeout=2))
+            return original_claim(screenplay_id, owner_id)
+
+        async def save_key_art(
+            screenplay_id: str, source_text: str, report: dict
+        ) -> None:
+            nonlocal generation_count
+            with count_lock:
+                generation_count += 1
+            main.update_record(
+                screenplay_id, keyArtUrl="data:image/png;base64,c3RhbGUtcmFjZQ=="
+            )
+
+        with (
+            patch.object(main, "claim_key_art_retry", side_effect=delay_first_claim),
+            patch.object(main, "generate_key_art", side_effect=save_key_art),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            delayed = executor.submit(
+                self.client.post,
+                "/api/screenplays/stale-precheck/key-art/retry",
+            )
+            self.assertTrue(first_claim_blocked.wait(timeout=2))
+            winner_response = self.client.post(
+                "/api/screenplays/stale-precheck/key-art/retry"
+            )
+            allow_first_claim.set()
+            delayed_response = delayed.result(timeout=2)
+
+        self.assertEqual(winner_response.status_code, 200)
+        self.assertEqual(delayed_response.status_code, 409)
+        self.assertEqual(
+            delayed_response.json(), {"detail": "Key art has already been generated."}
+        )
+        self.assertEqual(generation_count, 1)
+
+    def test_heartbeat_keeps_long_running_generation_claimed(self) -> None:
+        self.insert_screenplay("long-running")
+        generation_started = threading.Event()
+        release_generation = threading.Event()
+        generation_count = 0
+        count_lock = threading.Lock()
+
+        async def slow_key_art(
+            screenplay_id: str, source_text: str, report: dict
+        ) -> None:
+            nonlocal generation_count
+            with count_lock:
+                generation_count += 1
+            generation_started.set()
+            await main.asyncio.to_thread(release_generation.wait)
+            main.update_record(
+                screenplay_id, keyArtUrl="data:image/png;base64,bG9uZy1ydW5uaW5n"
+            )
+
+        with (
+            patch.object(main, "KEY_ART_CLAIM_TTL", timedelta(milliseconds=90)),
+            patch.object(main, "generate_key_art", side_effect=slow_key_art),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            first = executor.submit(
+                self.client.post,
+                "/api/screenplays/long-running/key-art/retry",
+            )
+            self.assertTrue(generation_started.wait(timeout=2))
+            threading.Event().wait(0.2)
+            second_response = self.client.post(
+                "/api/screenplays/long-running/key-art/retry"
+            )
+            release_generation.set()
+            first_response = first.result(timeout=2)
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 409)
+        self.assertEqual(
+            second_response.json(),
+            {
+                "detail": (
+                    "Key art generation is already in progress for this screenplay."
+                )
+            },
+        )
+        self.assertEqual(generation_count, 1)
 
 
 if __name__ == "__main__":

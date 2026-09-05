@@ -5,10 +5,9 @@ import base64
 import os
 import re
 import sqlite3
-import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any, Iterator, Literal
 
@@ -34,8 +33,7 @@ IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
 TEXT_FALLBACK_MODEL = os.getenv("GEMINI_TEXT_FALLBACK_MODEL", "gemini-3.5-flash")
 jobs: dict[str, asyncio.Task[None]] = {}
-key_art_retries_in_progress: set[str] = set()
-key_art_retry_claim_lock = threading.Lock()
+KEY_ART_CLAIM_TTL = timedelta(minutes=10)
 
 
 def now() -> str:
@@ -62,6 +60,16 @@ def db() -> Iterator[sqlite3.Connection]:
               decision_at TEXT,
               created_at TEXT NOT NULL,
               source_text TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS key_art_retry_claims (
+              screenplay_id TEXT PRIMARY KEY,
+              owner_id TEXT NOT NULL,
+              expires_at TEXT NOT NULL,
+              FOREIGN KEY (screenplay_id) REFERENCES screenplays(id) ON DELETE CASCADE
             )
             """
         )
@@ -161,6 +169,83 @@ def load_record(screenplay_id: str) -> dict[str, Any] | None:
     record["createdAt"] = record.pop("created_at")
     record["decisionAt"] = record.pop("decision_at")
     return record
+
+
+def claim_key_art_retry(
+    screenplay_id: str,
+    owner_id: str,
+    *,
+    claimed_at: datetime | None = None,
+) -> bool:
+    claimed_at = claimed_at or datetime.now(timezone.utc)
+    expires_at = claimed_at + KEY_ART_CLAIM_TTL
+    with db() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO key_art_retry_claims (screenplay_id, owner_id, expires_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(screenplay_id) DO UPDATE SET
+              owner_id = excluded.owner_id,
+              expires_at = excluded.expires_at
+            WHERE key_art_retry_claims.expires_at <= ?
+            """,
+            (
+                screenplay_id,
+                owner_id,
+                expires_at.isoformat(),
+                claimed_at.isoformat(),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def release_key_art_retry(screenplay_id: str, owner_id: str) -> None:
+    with db() as connection:
+        connection.execute(
+            """
+            DELETE FROM key_art_retry_claims
+            WHERE screenplay_id = ? AND owner_id = ?
+            """,
+            (screenplay_id, owner_id),
+        )
+
+
+def renew_key_art_retry(
+    screenplay_id: str,
+    owner_id: str,
+    *,
+    renewed_at: datetime | None = None,
+) -> bool:
+    renewed_at = renewed_at or datetime.now(timezone.utc)
+    with db() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE key_art_retry_claims
+            SET expires_at = ?
+            WHERE screenplay_id = ? AND owner_id = ?
+            """,
+            (
+                (renewed_at + KEY_ART_CLAIM_TTL).isoformat(),
+                screenplay_id,
+                owner_id,
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+async def maintain_key_art_retry_claim(
+    screenplay_id: str, owner_id: str, stop: asyncio.Event
+) -> None:
+    renewal_interval = min(
+        30.0, max(0.01, KEY_ART_CLAIM_TTL.total_seconds() / 3)
+    )
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=renewal_interval)
+            return
+        except TimeoutError:
+            if not renew_key_art_retry(screenplay_id, owner_id):
+                return
 
 
 def save_trace(screenplay_id: str, trace: list[dict[str, Any]], status: str | None = None) -> None:
@@ -469,26 +554,43 @@ async def retry_screenplay_key_art(screenplay_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="Coverage must be ready before retrying key art.")
     if record["keyArtUrl"]:
         raise HTTPException(status_code=409, detail="Key art has already been generated.")
-    with key_art_retry_claim_lock:
-        if screenplay_id in key_art_retries_in_progress:
-            raise HTTPException(
-                status_code=409,
-                detail="Key art generation is already in progress for this screenplay.",
-            )
-        key_art_retries_in_progress.add(screenplay_id)
+    claim_owner = str(uuid.uuid4())
+    if not claim_key_art_retry(screenplay_id, claim_owner):
+        raise HTTPException(
+            status_code=409,
+            detail="Key art generation is already in progress for this screenplay.",
+        )
 
+    stop_heartbeat = asyncio.Event()
+    heartbeat: asyncio.Task[None] | None = None
     try:
         with db() as connection:
             row = connection.execute(
-                "SELECT source_text FROM screenplays WHERE id = ?", (screenplay_id,)
+                """
+                SELECT source_text, key_art_url
+                FROM screenplays
+                WHERE id = ?
+                """,
+                (screenplay_id,),
             ).fetchone()
+        if row and row["key_art_url"]:
+            raise HTTPException(
+                status_code=409, detail="Key art has already been generated."
+            )
+        heartbeat = asyncio.create_task(
+            maintain_key_art_retry_claim(screenplay_id, claim_owner, stop_heartbeat)
+        )
         try:
             await generate_key_art(
                 screenplay_id, row["source_text"] if row else "", record["report"]
             )
         except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
             raise HTTPException(status_code=503, detail=key_art_error_message(exc)) from exc
     finally:
-        with key_art_retry_claim_lock:
-            key_art_retries_in_progress.discard(screenplay_id)
+        stop_heartbeat.set()
+        if heartbeat:
+            await heartbeat
+        release_key_art_retry(screenplay_id, claim_owner)
     return load_record(screenplay_id)
