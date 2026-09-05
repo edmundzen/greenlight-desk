@@ -590,7 +590,16 @@ async def retry_screenplay_key_art(screenplay_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=503, detail=key_art_error_message(exc)) from exc
     finally:
         stop_heartbeat.set()
-        if heartbeat:
-            await heartbeat
-        release_key_art_retry(screenplay_id, claim_owner)
+        heartbeat_error: Exception | None = None
+        try:
+            if heartbeat:
+                await heartbeat
+        except Exception as exc:
+            heartbeat_error = exc
+        finally:
+            release_key_art_retry(screenplay_id, claim_owner)
+        if heartbeat_error:
+            raise HTTPException(
+                status_code=503, detail=key_art_error_message(heartbeat_error)
+            ) from heartbeat_error
     return load_record(screenplay_id)

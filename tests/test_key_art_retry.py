@@ -335,6 +335,43 @@ class KeyArtRetryApiTests(unittest.TestCase):
         )
         self.assertEqual(generation_count, 1)
 
+    def test_heartbeat_cleanup_failure_releases_claim_for_next_retry(self) -> None:
+        self.insert_screenplay("heartbeat-cleanup-failure")
+        generated_url = "data:image/png;base64,cmV0cnktYWZ0ZXItY2xlYW51cA=="
+        generation_count = 0
+
+        async def generate_on_second_attempt(
+            screenplay_id: str, source_text: str, report: dict
+        ) -> None:
+            nonlocal generation_count
+            generation_count += 1
+            if generation_count == 1:
+                raise RuntimeError("image generation failed")
+            main.update_record(screenplay_id, keyArtUrl=generated_url)
+
+        heartbeat = AsyncMock(
+            side_effect=[RuntimeError("lease renewal cleanup failed"), None]
+        )
+        with (
+            patch.object(main, "maintain_key_art_retry_claim", heartbeat),
+            patch.object(main, "generate_key_art", side_effect=generate_on_second_attempt),
+        ):
+            first_response = self.client.post(
+                "/api/screenplays/heartbeat-cleanup-failure/key-art/retry"
+            )
+            second_response = self.client.post(
+                "/api/screenplays/heartbeat-cleanup-failure/key-art/retry"
+            )
+
+        self.assertEqual(first_response.status_code, 503)
+        self.assertEqual(
+            first_response.json(),
+            {"detail": "Key art could not be generated. Coverage remains ready."},
+        )
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(second_response.json()["keyArtUrl"], generated_url)
+        self.assertEqual(generation_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
