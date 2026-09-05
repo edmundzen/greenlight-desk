@@ -111,7 +111,7 @@ paths:
         "404":
           description: Screenplay not found
         "409":
-          description: Coverage is not ready or key art already exists
+          description: Coverage is unfinished or key art already exists
         "503":
           description: Key art is temporarily unavailable
   /screenplays/{screenplayId}/decision:

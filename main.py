@@ -456,7 +456,7 @@ async def retry_screenplay_key_art(screenplay_id: str) -> dict[str, Any]:
     record = load_record(screenplay_id)
     if not record:
         raise HTTPException(status_code=404, detail="Screenplay not found.")
-    if record["status"] != "ready" or not record["report"]:
+    if record["status"] not in {"ready", "approved", "rejected"} or not record["report"]:
         raise HTTPException(status_code=409, detail="Coverage must be ready before retrying key art.")
     if record["keyArtUrl"]:
         raise HTTPException(status_code=409, detail="Key art has already been generated.")
