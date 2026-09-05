@@ -94,6 +94,26 @@ paths:
           description: Screenplay not found
         "409":
           description: Screenplay is not in a failed state
+  /screenplays/{screenplayId}/key-art/retry:
+    post:
+      operationId: retryScreenplayKeyArt
+      tags: [coverage]
+      summary: Retry key art for completed screenplay coverage
+      parameters:
+        - $ref: "#/components/parameters/ScreenplayId"
+      responses:
+        "200":
+          description: Screenplay detail with generated key art
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScreenplayDetail"
+        "404":
+          description: Screenplay not found
+        "409":
+          description: Coverage is not ready or key art already exists
+        "503":
+          description: Key art is temporarily unavailable
   /screenplays/{screenplayId}/decision:
     post:
       operationId: decideScreenplay

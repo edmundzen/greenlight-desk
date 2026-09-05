@@ -101,6 +101,44 @@ export const RestartScreenplayResponse = zod.object({
 
 
 /**
+ * @summary Retry key art for completed screenplay coverage
+ */
+export const RetryScreenplayKeyArtParams = zod.object({
+  "screenplayId": zod.coerce.string()
+})
+
+export const RetryScreenplayKeyArtResponse = zod.object({
+  "id": zod.string(),
+  "fileName": zod.string(),
+  "mimeType": zod.string(),
+  "status": zod.enum(['queued', 'analyzing', 'ready', 'approved', 'rejected', 'failed']),
+  "createdAt": zod.string(),
+  "pageCount": zod.number().nullish(),
+  "report": zod.union([zod.object({
+  "logline": zod.string(),
+  "synopsis": zod.string(),
+  "strengths": zod.array(zod.string()),
+  "weaknesses": zod.array(zod.string()),
+  "comparableTitles": zod.array(zod.object({
+  "title": zod.string(),
+  "reason": zod.string()
+})),
+  "recommendation": zod.enum(['Pass', 'Consider', 'Recommend'])
+}),zod.null()]),
+  "trace": zod.array(zod.object({
+  "id": zod.string(),
+  "label": zod.string(),
+  "detail": zod.string(),
+  "status": zod.enum(['complete', 'active', 'pending', 'error']),
+  "createdAt": zod.string()
+})),
+  "keyArtUrl": zod.string().nullable(),
+  "decision": zod.union([zod.literal('approved'),zod.literal('rejected'),zod.literal(null)]).nullable(),
+  "decisionAt": zod.string().nullish()
+})
+
+
+/**
  * @summary Approve or reject screenplay coverage
  */
 export const DecideScreenplayParams = zod.object({

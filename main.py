@@ -219,6 +219,53 @@ def gemini_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def key_art_error_message(error: Exception) -> str:
+    detail = str(error)
+    if "429" in detail or "RESOURCE_EXHAUSTED" in detail or "quota" in detail.lower():
+        return "Gemini image quota is exhausted. Coverage remains ready."
+    if "404" in detail or "NOT_FOUND" in detail:
+        return "The Gemini image model is unavailable. Coverage remains ready."
+    return "Key art could not be generated. Coverage remains ready."
+
+
+async def generate_key_art(
+    screenplay_id: str, source_text: str, report: dict[str, Any] | CoverageReport
+) -> None:
+    report_data = report.model_dump() if isinstance(report, CoverageReport) else report
+    art_prompt = f"""
+Create one cinematic key-art image for this screenplay. It must feel like a polished
+festival one-sheet with no readable words, logos, or credits. Infer the genre, setting,
+and central visual metaphor from the saved coverage and script. Use strong composition,
+atmospheric lighting, and a restrained film-poster palette.
+
+SAVED COVERAGE:
+{report_data}
+
+SCREENPLAY EXCERPT:
+{source_text[:12000]}
+"""
+    art_response = await asyncio.to_thread(
+        gemini_client().models.generate_content,
+        model=IMAGE_MODEL,
+        contents=art_prompt,
+        config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
+    )
+    image_part = next(
+        (
+            part
+            for candidate in (art_response.candidates or [])
+            for part in (candidate.content.parts if candidate.content else [])
+            if part.inline_data and part.inline_data.data
+        ),
+        None,
+    )
+    if not image_part:
+        raise RuntimeError("Gemini returned no image data for key art.")
+    mime = image_part.inline_data.mime_type or "image/png"
+    encoded = base64.b64encode(image_part.inline_data.data).decode()
+    update_record(screenplay_id, keyArtUrl=f"data:{mime};base64,{encoded}")
+
+
 async def run_analysis(screenplay_id: str) -> None:
     record = load_record(screenplay_id)
     if not record:
@@ -284,47 +331,13 @@ SCREENPLAY:
         update_record(screenplay_id, report=report)
         await add_trace(screenplay_id, "Drafted recommendation", f"{report.recommendation} based on story and market fit")
 
-        art_prompt = f"""
-Create one cinematic key-art image for this screenplay. It must feel like a polished
-festival one-sheet with no readable words, logos, or credits. Infer the genre, setting,
-and central visual metaphor from the script. Use strong composition, atmospheric lighting,
-and a restrained film-poster palette.
-
-SCREENPLAY EXCERPT:
-{source_text[:12000]}
-"""
         try:
-            art_response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=IMAGE_MODEL,
-                contents=art_prompt,
-                config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
-            )
-            image_part = next(
-                (
-                    part
-                    for candidate in (art_response.candidates or [])
-                    for part in (candidate.content.parts if candidate.content else [])
-                    if part.inline_data and part.inline_data.data
-                ),
-                None,
-            )
-            if not image_part:
-                raise RuntimeError("Gemini returned no image data for key art.")
-            image_bytes = image_part.inline_data.data
-            mime = image_part.inline_data.mime_type or "image/png"
-            update_record(screenplay_id, keyArtUrl=f"data:{mime};base64,{base64.b64encode(image_bytes).decode()}")
+            await generate_key_art(screenplay_id, source_text, report)
             await add_trace(screenplay_id, "Generated key art", "Created one visual direction from the script’s genre and setting")
         except Exception as art_error:
             # Key art is an optional visual add-on. Image quota/model failures must
             # not prevent a producer from reviewing or deciding on the coverage.
-            art_detail = str(art_error)
-            if "429" in art_detail or "RESOURCE_EXHAUSTED" in art_detail or "quota" in art_detail.lower():
-                art_detail = "Unavailable — Gemini image-generation quota is exhausted; coverage is ready."
-            elif "404" in art_detail or "NOT_FOUND" in art_detail:
-                art_detail = "Unavailable — the configured Gemini image model is not available; coverage is ready."
-            else:
-                art_detail = "Unavailable — Gemini could not generate key art; coverage is ready."
+            art_detail = key_art_error_message(art_error)
             await add_trace(screenplay_id, "Generated key art", art_detail, "error")
         save_trace(screenplay_id, load_record(screenplay_id)["trace"], "ready")
     except Exception as exc:
@@ -435,4 +448,27 @@ async def decide_screenplay(screenplay_id: str, payload: DecisionInput) -> dict[
         decision_at=now(),
         status="approved" if payload.decision == "approved" else "rejected",
     )
+    return load_record(screenplay_id)
+
+
+@app.post("/api/screenplays/{screenplay_id}/key-art/retry")
+async def retry_screenplay_key_art(screenplay_id: str) -> dict[str, Any]:
+    record = load_record(screenplay_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Screenplay not found.")
+    if record["status"] != "ready" or not record["report"]:
+        raise HTTPException(status_code=409, detail="Coverage must be ready before retrying key art.")
+    if record["keyArtUrl"]:
+        raise HTTPException(status_code=409, detail="Key art has already been generated.")
+
+    with db() as connection:
+        row = connection.execute(
+            "SELECT source_text FROM screenplays WHERE id = ?", (screenplay_id,)
+        ).fetchone()
+    try:
+        await generate_key_art(
+            screenplay_id, row["source_text"] if row else "", record["report"]
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=key_art_error_message(exc)) from exc
     return load_record(screenplay_id)

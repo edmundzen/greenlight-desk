@@ -429,6 +429,77 @@ export const useRestartScreenplay = <TError = ErrorType<void>,
       return useMutation(getRestartScreenplayMutationOptions(options));
     }
 
+export const getRetryScreenplayKeyArtUrl = (screenplayId: string,) => {
+
+
+
+
+  return `/api/screenplays/${screenplayId}/key-art/retry`
+}
+
+/**
+ * @summary Retry key art for completed screenplay coverage
+ */
+export const retryScreenplayKeyArt = async (screenplayId: string, options?: Parameters<typeof customFetch>[1]): Promise<ScreenplayDetail> => {
+
+  return customFetch<ScreenplayDetail>(getRetryScreenplayKeyArtUrl(screenplayId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getRetryScreenplayKeyArtMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof retryScreenplayKeyArt>>, TError,{screenplayId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof retryScreenplayKeyArt>>, TError,{screenplayId: string}, TContext> => {
+
+const mutationKey = ['retryScreenplayKeyArt'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof retryScreenplayKeyArt>>, {screenplayId: string}> = (props) => {
+          const {screenplayId} = props ?? {};
+
+          return  retryScreenplayKeyArt(screenplayId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RetryScreenplayKeyArtMutationResult = NonNullable<Awaited<ReturnType<typeof retryScreenplayKeyArt>>>
+
+    export type RetryScreenplayKeyArtMutationError = ErrorType<void>
+
+    /**
+ * @summary Retry key art for completed screenplay coverage
+ */
+export const useRetryScreenplayKeyArt = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof retryScreenplayKeyArt>>, TError,{screenplayId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof retryScreenplayKeyArt>>,
+        TError,
+        {screenplayId: string},
+        TContext
+      > => {
+      return useMutation(getRetryScreenplayKeyArtMutationOptions(options));
+    }
+
 export const getDecideScreenplayUrl = (screenplayId: string,) => {
 
 
