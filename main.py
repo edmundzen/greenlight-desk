@@ -5,6 +5,7 @@ import base64
 import os
 import re
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from io import BytesIO
@@ -32,6 +33,8 @@ IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
 TEXT_FALLBACK_MODEL = os.getenv("GEMINI_TEXT_FALLBACK_MODEL", "gemini-3.5-flash")
 jobs: dict[str, asyncio.Task[None]] = {}
+key_art_retries_in_progress: set[str] = set()
+key_art_retry_claim_lock = threading.Lock()
 
 
 def now() -> str:
@@ -460,15 +463,26 @@ async def retry_screenplay_key_art(screenplay_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="Coverage must be ready before retrying key art.")
     if record["keyArtUrl"]:
         raise HTTPException(status_code=409, detail="Key art has already been generated.")
+    with key_art_retry_claim_lock:
+        if screenplay_id in key_art_retries_in_progress:
+            raise HTTPException(
+                status_code=409,
+                detail="Key art generation is already in progress for this screenplay.",
+            )
+        key_art_retries_in_progress.add(screenplay_id)
 
-    with db() as connection:
-        row = connection.execute(
-            "SELECT source_text FROM screenplays WHERE id = ?", (screenplay_id,)
-        ).fetchone()
     try:
-        await generate_key_art(
-            screenplay_id, row["source_text"] if row else "", record["report"]
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=key_art_error_message(exc)) from exc
+        with db() as connection:
+            row = connection.execute(
+                "SELECT source_text FROM screenplays WHERE id = ?", (screenplay_id,)
+            ).fetchone()
+        try:
+            await generate_key_art(
+                screenplay_id, row["source_text"] if row else "", record["report"]
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=key_art_error_message(exc)) from exc
+    finally:
+        with key_art_retry_claim_lock:
+            key_art_retries_in_progress.discard(screenplay_id)
     return load_record(screenplay_id)

@@ -111,7 +111,15 @@ paths:
         "404":
           description: Screenplay not found
         "409":
-          description: Coverage is unfinished or key art already exists
+          description: Coverage is unfinished, key art already exists, or generation is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                generationInProgress:
+                  value:
+                    detail: Key art generation is already in progress for this screenplay.
         "503":
           description: Key art is temporarily unavailable
   /screenplays/{screenplayId}/decision:
@@ -145,6 +153,12 @@ components:
       schema:
         type: string
   schemas:
+    ErrorResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
     HealthStatus:
       type: object
       properties:

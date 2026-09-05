@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -42,6 +44,7 @@ class KeyArtRetryApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
+        main.key_art_retries_in_progress.clear()
         self.db_path_patch.stop()
         self.temp_dir.cleanup()
 
@@ -151,6 +154,50 @@ class KeyArtRetryApiTests(unittest.TestCase):
             response.json(), {"detail": "Key art has already been generated."}
         )
         self.assertEqual(self.raw_row("already-generated")[-1], existing_url)
+
+    def test_concurrent_retries_generate_only_one_image(self) -> None:
+        self.insert_screenplay("concurrent")
+        generation_started = threading.Event()
+        release_generation = threading.Event()
+        call_count = 0
+        call_count_lock = threading.Lock()
+
+        async def slow_key_art(
+            screenplay_id: str, source_text: str, report: dict
+        ) -> None:
+            nonlocal call_count
+            with call_count_lock:
+                call_count += 1
+            generation_started.set()
+            await main.asyncio.to_thread(release_generation.wait)
+            main.update_record(
+                screenplay_id, keyArtUrl="data:image/png;base64,Y29uY3VycmVudA=="
+            )
+
+        with patch.object(main, "generate_key_art", side_effect=slow_key_art):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(
+                    self.client.post,
+                    "/api/screenplays/concurrent/key-art/retry",
+                )
+                self.assertTrue(generation_started.wait(timeout=2))
+                second_response = self.client.post(
+                    "/api/screenplays/concurrent/key-art/retry"
+                )
+                release_generation.set()
+                first_response = first.result(timeout=2)
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 409)
+        self.assertEqual(
+            second_response.json(),
+            {
+                "detail": (
+                    "Key art generation is already in progress for this screenplay."
+                )
+            },
+        )
+        self.assertEqual(call_count, 1)
 
 
 if __name__ == "__main__":
