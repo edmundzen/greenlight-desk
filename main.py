@@ -280,27 +280,39 @@ and a restrained film-poster palette.
 SCREENPLAY EXCERPT:
 {source_text[:12000]}
 """
-        art_response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=IMAGE_MODEL,
-            contents=art_prompt,
-            config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
-        )
-        image_part = next(
-            (
-                part
-                for candidate in (art_response.candidates or [])
-                for part in (candidate.content.parts if candidate.content else [])
-                if part.inline_data and part.inline_data.data
-            ),
-            None,
-        )
-        if not image_part:
-            raise RuntimeError("Gemini returned no image data for key art.")
-        image_bytes = image_part.inline_data.data
-        mime = image_part.inline_data.mime_type or "image/png"
-        update_record(screenplay_id, keyArtUrl=f"data:{mime};base64,{base64.b64encode(image_bytes).decode()}")
-        await add_trace(screenplay_id, "Generated key art", "Created one visual direction from the script’s genre and setting")
+        try:
+            art_response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=IMAGE_MODEL,
+                contents=art_prompt,
+                config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
+            )
+            image_part = next(
+                (
+                    part
+                    for candidate in (art_response.candidates or [])
+                    for part in (candidate.content.parts if candidate.content else [])
+                    if part.inline_data and part.inline_data.data
+                ),
+                None,
+            )
+            if not image_part:
+                raise RuntimeError("Gemini returned no image data for key art.")
+            image_bytes = image_part.inline_data.data
+            mime = image_part.inline_data.mime_type or "image/png"
+            update_record(screenplay_id, keyArtUrl=f"data:{mime};base64,{base64.b64encode(image_bytes).decode()}")
+            await add_trace(screenplay_id, "Generated key art", "Created one visual direction from the script’s genre and setting")
+        except Exception as art_error:
+            # Key art is an optional visual add-on. Image quota/model failures must
+            # not prevent a producer from reviewing or deciding on the coverage.
+            art_detail = str(art_error)
+            if "429" in art_detail or "RESOURCE_EXHAUSTED" in art_detail or "quota" in art_detail.lower():
+                art_detail = "Unavailable — Gemini image-generation quota is exhausted; coverage is ready."
+            elif "404" in art_detail or "NOT_FOUND" in art_detail:
+                art_detail = "Unavailable — the configured Gemini image model is not available; coverage is ready."
+            else:
+                art_detail = "Unavailable — Gemini could not generate key art; coverage is ready."
+            await add_trace(screenplay_id, "Generated key art", art_detail, "error")
         save_trace(screenplay_id, load_record(screenplay_id)["trace"], "ready")
     except Exception as exc:
         record = load_record(screenplay_id)
