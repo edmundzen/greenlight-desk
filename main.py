@@ -480,7 +480,7 @@ async def analyze_screenplay(payload: ScreenplayAnalyzeInput) -> dict[str, str]:
     if not source_text.strip():
         raise HTTPException(status_code=400, detail="The screenplay did not contain readable text.")
     screenplay_id = str(uuid.uuid4())
-    initial_trace = initial_trace()
+    trace = initial_trace()
     import json
 
     with db() as connection:
@@ -490,7 +490,7 @@ async def analyze_screenplay(payload: ScreenplayAnalyzeInput) -> dict[str, str]:
             (id, file_name, mime_type, status, page_count, trace_json, created_at, source_text)
             VALUES (?, ?, ?, 'analyzing', ?, ?, ?, ?)
             """,
-            (screenplay_id, payload.fileName, payload.mimeType, page_count, json.dumps(initial_trace), now(), source_text),
+            (screenplay_id, payload.fileName, payload.mimeType, page_count, json.dumps(trace), now(), source_text),
         )
     jobs[screenplay_id] = asyncio.create_task(run_analysis(screenplay_id))
     return {"screenplayId": screenplay_id, "status": "analyzing"}
