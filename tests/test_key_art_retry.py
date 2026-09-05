@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -82,7 +83,7 @@ class KeyArtRetryApiTests(unittest.TestCase):
             )
 
     def raw_row(self, screenplay_id: str) -> tuple:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             return connection.execute(
                 """
                 SELECT file_name, mime_type, status, page_count, report_json,

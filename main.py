@@ -7,9 +7,10 @@ import re
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from io import BytesIO
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,28 +42,33 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def db() -> sqlite3.Connection:
+@contextmanager
+def db() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS screenplays (
-          id TEXT PRIMARY KEY,
-          file_name TEXT NOT NULL,
-          mime_type TEXT NOT NULL,
-          status TEXT NOT NULL,
-          page_count INTEGER,
-          report_json TEXT,
-          trace_json TEXT NOT NULL,
-          key_art_url TEXT,
-          decision TEXT,
-          decision_at TEXT,
-          created_at TEXT NOT NULL,
-          source_text TEXT NOT NULL
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS screenplays (
+              id TEXT PRIMARY KEY,
+              file_name TEXT NOT NULL,
+              mime_type TEXT NOT NULL,
+              status TEXT NOT NULL,
+              page_count INTEGER,
+              report_json TEXT,
+              trace_json TEXT NOT NULL,
+              key_art_url TEXT,
+              decision TEXT,
+              decision_at TEXT,
+              created_at TEXT NOT NULL,
+              source_text TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    return connection
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 class ScreenplayAnalyzeInput(BaseModel):
