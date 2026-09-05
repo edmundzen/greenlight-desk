@@ -29,7 +29,8 @@ app.add_middleware(
 
 DB_PATH = os.getenv("GREENLIGHT_DB_PATH", "greenlight.db")
 IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
-TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.5-flash")
+TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
+TEXT_FALLBACK_MODEL = os.getenv("GEMINI_TEXT_FALLBACK_MODEL", "gemini-3.5-flash")
 jobs: dict[str, asyncio.Task[None]] = {}
 
 
@@ -257,16 +258,28 @@ Consider, or Recommend.
 SCREENPLAY:
 {source_text[:160000]}
 """
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=TEXT_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=CoverageReport.model_json_schema(),
-                temperature=0.25,
-            ),
-        )
+        response = None
+        text_error: Exception | None = None
+        for model in dict.fromkeys((TEXT_MODEL, TEXT_FALLBACK_MODEL)):
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=CoverageReport.model_json_schema(),
+                        temperature=0.25,
+                    ),
+                )
+                break
+            except Exception as exc:
+                text_error = exc
+                error_detail = str(exc)
+                if not any(marker in error_detail for marker in ("503", "UNAVAILABLE", "404", "NOT_FOUND")):
+                    raise
+        if response is None:
+            raise text_error or RuntimeError("Gemini did not return coverage.")
         report = CoverageReport.model_validate_json(response.text)
         update_record(screenplay_id, report=report)
         await add_trace(screenplay_id, "Drafted recommendation", f"{report.recommendation} based on story and market fit")
