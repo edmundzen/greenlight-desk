@@ -97,19 +97,29 @@ class KeyArtRetryApiTests(unittest.TestCase):
     def test_quota_failed_retry_preserves_every_completed_coverage_field(self) -> None:
         self.insert_screenplay("quota-failure")
         before = self.raw_row("quota-failure")
-
-        with patch.object(
-            main,
-            "generate_key_art",
-            AsyncMock(side_effect=RuntimeError("429 RESOURCE_EXHAUSTED quota")),
-        ):
-            response = self.client.post("/api/screenplays/quota-failure/key-art/retry")
-
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(
-            response.json(),
-            {"detail": "Gemini image quota is exhausted. Coverage remains ready."},
+        generate_key_art = AsyncMock(
+            side_effect=RuntimeError("429 RESOURCE_EXHAUSTED quota")
         )
+
+        with patch.object(main, "generate_key_art", generate_key_art):
+            first_response = self.client.post(
+                "/api/screenplays/quota-failure/key-art/retry"
+            )
+            self.assertTrue(
+                main.claim_key_art_retry("quota-failure", "regression-check")
+            )
+            main.release_key_art_retry("quota-failure", "regression-check")
+            second_response = self.client.post(
+                "/api/screenplays/quota-failure/key-art/retry"
+            )
+
+        for response in (first_response, second_response):
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(
+                response.json(),
+                {"detail": "Gemini image quota is exhausted. Coverage remains ready."},
+            )
+        self.assertEqual(generate_key_art.await_count, 2)
         self.assertEqual(self.raw_row("quota-failure"), before)
 
     def test_successful_retry_changes_only_key_art_url(self) -> None:
