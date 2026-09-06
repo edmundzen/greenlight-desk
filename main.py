@@ -21,7 +21,6 @@ from google.genai import types
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-
 app = FastAPI(title="Greenlight Desk API")
 app.add_middleware(
     CORSMiddleware,
@@ -36,6 +35,7 @@ TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
 TEXT_FALLBACK_MODEL = os.getenv("GEMINI_TEXT_FALLBACK_MODEL", "gemini-3.5-flash")
 jobs: dict[str, asyncio.Task[None]] = {}
 KEY_ART_CLAIM_TTL = timedelta(minutes=10)
+import logging
 
 
 def now() -> str:
@@ -667,17 +667,46 @@ async def retry_screenplay_key_art(screenplay_id: str) -> dict[str, Any]:
         except Exception as exc:
             if isinstance(exc, HTTPException):
                 raise
+            logger.error(
+                "Key art image generation failed",
+                extra={
+                    "event": "key_art_image_generation_failed",
+                    "screenplay_id": screenplay_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
             raise HTTPException(status_code=503, detail=key_art_error_message(exc)) from exc
     finally:
         stop_heartbeat.set()
         heartbeat_error: Exception | None = None
+        release_error: Exception | None = None
         try:
             if heartbeat:
                 await heartbeat
         except Exception as exc:
             heartbeat_error = exc
-        finally:
+            logger.error(
+                "Key art retry heartbeat cleanup failed",
+                extra={
+                    "event": "key_art_retry_heartbeat_failed",
+                    "screenplay_id": screenplay_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        try:
             release_key_art_retry(screenplay_id, claim_owner)
+        except Exception as exc:
+            release_error = exc
+            logger.error(
+                "Key art retry claim release failed",
+                extra={
+                    "event": "key_art_retry_claim_release_failed",
+                    "screenplay_id": screenplay_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        if release_error:
+            raise release_error
         if heartbeat_error:
             raise HTTPException(
                 status_code=503, detail=key_art_error_message(heartbeat_error)

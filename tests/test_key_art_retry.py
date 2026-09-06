@@ -372,6 +372,42 @@ class KeyArtRetryApiTests(unittest.TestCase):
         self.assertEqual(second_response.json()["keyArtUrl"], generated_url)
         self.assertEqual(generation_count, 2)
 
+    def test_failures_log_distinct_events_without_sensitive_context(self) -> None:
+        self.insert_screenplay("structured-logging")
+        heartbeat = AsyncMock(side_effect=RuntimeError("private heartbeat detail"))
+
+        with (
+            patch.object(main, "maintain_key_art_retry_claim", heartbeat),
+            patch.object(
+                main,
+                "generate_key_art",
+                AsyncMock(side_effect=RuntimeError("private provider detail")),
+            ),
+            patch.object(
+                main,
+                "release_key_art_retry",
+                side_effect=RuntimeError("private database detail"),
+            ),
+            self.assertLogs(main.logger, level="ERROR") as captured,
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                main.asyncio.run(main.retry_screenplay_key_art("structured-logging"))
+
+        self.assertEqual(str(raised.exception), "private database detail")
+        records = captured.records
+        self.assertEqual(
+            [record.event for record in records],
+            [
+                "key_art_image_generation_failed",
+                "key_art_retry_heartbeat_failed",
+                "key_art_retry_claim_release_failed",
+            ],
+        )
+        for record in records:
+            self.assertEqual(record.screenplay_id, "structured-logging")
+            self.assertEqual(record.error_type, "RuntimeError")
+            self.assertNotIn("private", record.getMessage())
+
 
 if __name__ == "__main__":
     unittest.main()
