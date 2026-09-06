@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import html
+import json
 import os
 import re
 import sqlite3
@@ -29,7 +32,6 @@ app.add_middleware(
 )
 
 DB_PATH = os.getenv("GREENLIGHT_DB_PATH", "greenlight.db")
-IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
 TEXT_FALLBACK_MODEL = os.getenv("GEMINI_TEXT_FALLBACK_MODEL", "gemini-3.5-flash")
 jobs: dict[str, asyncio.Task[None]] = {}
@@ -304,6 +306,23 @@ async def add_trace(screenplay_id: str, label: str, detail: str, status: str = "
     await asyncio.sleep(0.55)
 
 
+def replace_trace_event(
+    screenplay_id: str, label: str, detail: str, status: str = "complete"
+) -> None:
+    record = load_record(screenplay_id)
+    if not record:
+        return
+    trace = record["trace"]
+    existing = next((item for item in reversed(trace) if item["label"] == label), None)
+    if existing:
+        existing["detail"] = detail
+        existing["status"] = status
+        existing["createdAt"] = now()
+    else:
+        trace.append(trace_item(label, detail, status))
+    save_trace(screenplay_id, trace)
+
+
 def gemini_client() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -314,50 +333,106 @@ def gemini_client() -> genai.Client:
 
 
 def key_art_error_message(error: Exception) -> str:
-    detail = str(error)
-    if "429" in detail or "RESOURCE_EXHAUSTED" in detail or "quota" in detail.lower():
-        return "Gemini image quota is exhausted. Coverage remains ready."
-    if "404" in detail or "NOT_FOUND" in detail:
-        return "The Gemini image model is unavailable. Coverage remains ready."
-    return "Key art could not be generated. Coverage remains ready."
+    return "Key art could not be rendered. Coverage remains ready."
+
+
+GENRE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "thriller": ("thriller", "danger", "threat", "secret", "flee", "escape", "tension", "mystery"),
+    "horror": ("horror", "haunt", "terror", "nightmare", "supernatural", "ghost", "monster"),
+    "science-fiction": ("science fiction", "sci-fi", "space", "future", "robot", "alien", "technology"),
+    "romance": ("romance", "romantic", "love", "relationship", "heart", "intimacy"),
+    "comedy": ("comedy", "comic", "funny", "humor", "hilarious", "satire"),
+    "adventure": ("adventure", "quest", "journey", "expedition", "discovery", "world"),
+    "drama": ("drama", "family", "grief", "identity", "character", "emotional"),
+}
+
+TONE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "tense": ("tense", "tension", "urgent", "danger", "threat", "escape", "desperate", "stakes"),
+    "dark": ("dark", "grim", "violent", "death", "terrifying", "sinister", "night"),
+    "mysterious": ("mystery", "mysterious", "secret", "unknown", "unseen", "discovery"),
+    "warm": ("warm", "tender", "intimate", "family", "love", "heartfelt"),
+    "hopeful": ("hope", "hopeful", "uplifting", "triumph", "redemption", "joy"),
+}
+
+TONE_PALETTES: dict[str, tuple[str, str, str, str]] = {
+    "tense": ("#102f2d", "#071b1a", "#e26f45", "#f4d6b8"),
+    "dark": ("#241d30", "#090a12", "#b7464b", "#d9b6a3"),
+    "mysterious": ("#18313a", "#0a1821", "#b86b54", "#d7c6a8"),
+    "warm": ("#56352f", "#241b1b", "#e19a6a", "#f5dfc2"),
+    "hopeful": ("#315d59", "#162f36", "#e0b85d", "#f5ead0"),
+}
+
+
+def _coverage_text(report: dict[str, Any]) -> str:
+    values: list[str] = [
+        str(report.get("logline", "")),
+        str(report.get("synopsis", "")),
+        *[str(item) for item in report.get("strengths", [])],
+        *[str(item) for item in report.get("weaknesses", [])],
+    ]
+    return " ".join(values).lower()
+
+
+def _best_keyword_match(text: str, groups: dict[str, tuple[str, ...]], default: str) -> str:
+    scores = {
+        name: sum(text.count(keyword) for keyword in keywords)
+        for name, keywords in groups.items()
+    }
+    winner = max(scores, key=scores.get)
+    return winner if scores[winner] else default
+
+
+def render_key_art_svg(report: dict[str, Any]) -> str:
+    text = _coverage_text(report)
+    genre = _best_keyword_match(text, GENRE_KEYWORDS, "drama")
+    tone = _best_keyword_match(text, TONE_KEYWORDS, "mysterious")
+    background, shadow, accent, highlight = TONE_PALETTES[tone]
+    digest = hashlib.sha256(
+        json.dumps(report, sort_keys=True, ensure_ascii=False).encode()
+    ).digest()
+    shift_x = 40 + digest[0] % 150
+    shift_y = 20 + digest[1] % 110
+    rotation = -18 + digest[2] % 37
+
+    compositions = {
+        "thriller": f'<path d="M0 810 L{420 + shift_x} 90 L720 810 Z" fill="{accent}" opacity=".16"/><path d="M180 810 L690 210 L1010 810 Z" fill="{highlight}" opacity=".07"/>',
+        "horror": f'<circle cx="{760 + shift_x}" cy="{180 + shift_y}" r="235" fill="{accent}" opacity=".14"/><path d="M520 810 Q650 300 780 810 Z" fill="#000" opacity=".32"/>',
+        "science-fiction": f'<ellipse cx="790" cy="310" rx="360" ry="120" fill="none" stroke="{accent}" stroke-width="9" opacity=".28" transform="rotate({rotation} 790 310)"/><circle cx="790" cy="310" r="72" fill="{highlight}" opacity=".18"/>',
+        "romance": f'<circle cx="{420 + shift_x}" cy="{250 + shift_y}" r="250" fill="{accent}" opacity=".13"/><circle cx="{680 + shift_x}" cy="{250 + shift_y}" r="250" fill="{highlight}" opacity=".09"/>',
+        "comedy": f'<circle cx="{350 + shift_x}" cy="{220 + shift_y}" r="210" fill="{accent}" opacity=".22"/><rect x="650" y="130" width="310" height="310" rx="70" fill="{highlight}" opacity=".10" transform="rotate({rotation} 805 285)"/>',
+        "adventure": f'<path d="M0 720 L330 310 L510 560 L760 180 L1200 720 V810 H0 Z" fill="{accent}" opacity=".17"/><circle cx="900" cy="180" r="105" fill="{highlight}" opacity=".20"/>',
+        "drama": f'<rect x="{210 + shift_x}" y="100" width="330" height="760" fill="{accent}" opacity=".12" transform="rotate({rotation} 375 480)"/><circle cx="850" cy="260" r="190" fill="{highlight}" opacity=".10"/>',
+    }
+    motif = compositions[genre]
+    genre_label = html.escape(genre.replace("-", " ").upper())
+    tone_label = html.escape(tone.upper())
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="810" viewBox="0 0 1200 810">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="{background}"/><stop offset="1" stop-color="{shadow}"/></linearGradient>
+  <radialGradient id="glow"><stop stop-color="{accent}" stop-opacity=".45"/><stop offset="1" stop-color="{accent}" stop-opacity="0"/></radialGradient>
+  <filter id="grain"><feTurbulence baseFrequency=".72" numOctaves="3" seed="{digest[3]}"/><feColorMatrix values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 .08 0"/></filter>
+</defs>
+<rect width="1200" height="810" fill="url(#bg)"/>
+<circle cx="{780 + shift_x}" cy="{190 + shift_y}" r="330" fill="url(#glow)"/>
+{motif}
+<g fill="none" stroke="{highlight}" opacity=".25">
+  <circle cx="1035" cy="135" r="108"/><circle cx="1035" cy="135" r="155"/>
+  <rect x="1050" y="650" width="70" height="105"/><rect x="1063" y="663" width="44" height="79"/>
+</g>
+<path d="M70 690 H470" stroke="{highlight}" opacity=".34"/>
+<text x="70" y="730" fill="{highlight}" font-family="Arial, sans-serif" font-size="22" letter-spacing="8">{genre_label}</text>
+<text x="70" y="770" fill="{accent}" font-family="Arial, sans-serif" font-size="15" letter-spacing="6">{tone_label} / VISUAL NORTH STAR</text>
+<rect width="1200" height="810" filter="url(#grain)" opacity=".28"/>
+</svg>"""
 
 
 async def generate_key_art(
     screenplay_id: str, source_text: str, report: dict[str, Any] | CoverageReport
 ) -> None:
     report_data = report.model_dump() if isinstance(report, CoverageReport) else report
-    art_prompt = f"""
-Create one cinematic key-art image for this screenplay. It must feel like a polished
-festival one-sheet with no readable words, logos, or credits. Infer the genre, setting,
-and central visual metaphor from the saved coverage and script. Use strong composition,
-atmospheric lighting, and a restrained film-poster palette.
-
-SAVED COVERAGE:
-{report_data}
-
-SCREENPLAY EXCERPT:
-{source_text[:12000]}
-"""
-    art_response = await asyncio.to_thread(
-        gemini_client().models.generate_content,
-        model=IMAGE_MODEL,
-        contents=art_prompt,
-        config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
-    )
-    image_part = next(
-        (
-            part
-            for candidate in (art_response.candidates or [])
-            for part in (candidate.content.parts if candidate.content else [])
-            if part.inline_data and part.inline_data.data
-        ),
-        None,
-    )
-    if not image_part:
-        raise RuntimeError("Gemini returned no image data for key art.")
-    mime = image_part.inline_data.mime_type or "image/png"
-    encoded = base64.b64encode(image_part.inline_data.data).decode()
-    update_record(screenplay_id, keyArtUrl=f"data:{mime};base64,{encoded}")
+    svg = render_key_art_svg(report_data)
+    encoded = base64.b64encode(svg.encode()).decode()
+    update_record(screenplay_id, keyArtUrl=f"data:image/svg+xml;base64,{encoded}")
 
 
 async def run_analysis(screenplay_id: str) -> None:
@@ -427,7 +502,7 @@ SCREENPLAY:
 
         try:
             await generate_key_art(screenplay_id, source_text, report)
-            await add_trace(screenplay_id, "Generated key art", "Created one visual direction from the script’s genre and setting")
+            await add_trace(screenplay_id, "Generated key art", "Rendered a deterministic visual direction from coverage genre and tone")
         except Exception as art_error:
             # Key art is an optional visual add-on. Image quota/model failures must
             # not prevent a producer from reviewing or deciding on the coverage.
@@ -583,6 +658,11 @@ async def retry_screenplay_key_art(screenplay_id: str) -> dict[str, Any]:
         try:
             await generate_key_art(
                 screenplay_id, row["source_text"] if row else "", record["report"]
+            )
+            replace_trace_event(
+                screenplay_id,
+                "Generated key art",
+                "Rendered a deterministic visual direction from coverage genre and tone",
             )
         except Exception as exc:
             if isinstance(exc, HTTPException):

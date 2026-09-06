@@ -22,7 +22,7 @@ Greenlight Desk helps producers turn screenplay drafts into traceable, reviewabl
 
 ## Where things live
 
-- `main.py` — FastAPI service, Gemini analysis, trace orchestration, and decision gate
+- `main.py` — FastAPI service, Gemini coverage analysis, deterministic SVG key art, trace orchestration, and decision gate
 - `artifacts/greenlight-desk/src/App.tsx` — producer workspace UI
 - `artifacts/greenlight-desk/src/index.css` — Greenlight Desk visual language
 - `lib/api-spec/openapi.yaml` — API contract source of truth
@@ -30,13 +30,13 @@ Greenlight Desk helps producers turn screenplay drafts into traceable, reviewabl
 ## Architecture decisions
 
 - The analysis job runs asynchronously so the client can poll the detail endpoint and reveal trace events progressively.
-- Coverage and key art are generated only through the Google Gemini SDK; missing credentials fail explicitly.
+- Coverage is generated through the Google Gemini SDK; missing credentials fail explicitly. Key art is rendered locally as deterministic SVG from the report’s inferred genre and tone.
 - Decisions are rejected by the API until a ready report exists, keeping approval as a hard human gate.
 
 ## Product
 
 - Upload PDF or TXT screenplay drafts.
-- Review incremental agent trace events, structured coverage, and Gemini-generated key art.
+- Review incremental agent trace events, structured coverage, and deterministic algorithmic key art.
 - Approve or reject coverage after the report is ready.
 
 ## User preferences

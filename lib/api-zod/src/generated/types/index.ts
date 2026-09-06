@@ -13,6 +13,7 @@ export * from './coverageReportComparableTitlesItem';
 export * from './coverageReportRecommendation';
 export * from './decisionInput';
 export * from './decisionInputDecision';
+export * from './errorResponse';
 export * from './healthStatus';
 export * from './screenplayAnalyzeInput';
 export * from './screenplayAnalyzeInputMimeType';

@@ -22,6 +22,7 @@ import type {
 import type {
   AnalysisJob,
   DecisionInput,
+  ErrorResponse,
   HealthStatus,
   ScreenplayAnalyzeInput,
   ScreenplayDetail,
@@ -455,7 +456,7 @@ export const retryScreenplayKeyArt = async (screenplayId: string, options?: Para
 
 
 
-export const getRetryScreenplayKeyArtMutationOptions = <TError = ErrorType<void>,
+export const getRetryScreenplayKeyArtMutationOptions = <TError = ErrorType<void | ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof retryScreenplayKeyArt>>, TError,{screenplayId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof retryScreenplayKeyArt>>, TError,{screenplayId: string}, TContext> => {
 
@@ -484,12 +485,12 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type RetryScreenplayKeyArtMutationResult = NonNullable<Awaited<ReturnType<typeof retryScreenplayKeyArt>>>
 
-    export type RetryScreenplayKeyArtMutationError = ErrorType<void>
+    export type RetryScreenplayKeyArtMutationError = ErrorType<void | ErrorResponse>
 
     /**
  * @summary Retry key art for completed screenplay coverage
  */
-export const useRetryScreenplayKeyArt = <TError = ErrorType<void>,
+export const useRetryScreenplayKeyArt = <TError = ErrorType<void | ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof retryScreenplayKeyArt>>, TError,{screenplayId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof retryScreenplayKeyArt>>,

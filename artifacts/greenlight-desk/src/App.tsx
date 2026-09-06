@@ -177,8 +177,8 @@ function KeyArt({ detail, onRetry, isRetrying, retryError }: { detail?: Screenpl
       </div>
       <div className="flex items-center justify-between gap-3 px-5 py-3.5">
         <div>
-          <span className="text-[11px] text-muted-foreground">{detail?.keyArtUrl ? 'Generated from coverage' : 'Generated after analysis completes'}</span>
-          {retryError && <div data-testid="text-key-art-retry-error" className="mt-1 text-[10px] text-destructive">Image quota is unavailable. Coverage is unchanged.</div>}
+          <span className="text-[11px] text-muted-foreground">{detail?.keyArtUrl ? 'Algorithmically rendered from coverage' : 'Generated after analysis completes'}</span>
+          {retryError && <div data-testid="text-key-art-retry-error" className="mt-1 text-[10px] text-destructive">Key art could not be rendered. Coverage is unchanged.</div>}
         </div>
         {detail?.keyArtUrl ? <button data-testid="button-open-key-art" onClick={() => window.open(detail.keyArtUrl ?? '', '_blank', 'noopener,noreferrer')} className="flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline">Open <ArrowUpRight size={12} /></button> : detail?.status === 'ready' && detail.report ? <button data-testid="button-retry-key-art" onClick={onRetry} disabled={isRetrying} className="flex h-8 flex-none items-center gap-1.5 rounded-md border border-border bg-card px-3 text-[11px] font-semibold text-primary transition hover:bg-muted disabled:opacity-60">{isRetrying ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}{isRetrying ? 'Retrying…' : 'Retry key art'}</button> : null}
       </div>
