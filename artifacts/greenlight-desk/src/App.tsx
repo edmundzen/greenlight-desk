@@ -162,6 +162,22 @@ function TraceRow({ event }: { event: TraceEvent }) {
   );
 }
 
+function openKeyArt(url: string) {
+  if (!url.startsWith('data:')) {
+    window.open(url, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  const comma = url.indexOf(',');
+  const metadata = url.slice(5, comma);
+  const payload = url.slice(comma + 1);
+  const mimeType = metadata.split(';')[0] || 'image/svg+xml';
+  const binary = metadata.includes(';base64') ? atob(payload) : decodeURIComponent(payload);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  const objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+  window.open(objectUrl, '_blank', 'noopener,noreferrer');
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+}
+
 function KeyArt({ detail, onRetry, isRetrying, retryError }: { detail?: ScreenplayDetail; onRetry: () => void; isRetrying: boolean; retryError: boolean }) {
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-[0_8px_24px_rgba(77,61,40,.035)]">
@@ -180,7 +196,7 @@ function KeyArt({ detail, onRetry, isRetrying, retryError }: { detail?: Screenpl
           <span className="text-[11px] text-muted-foreground">{detail?.keyArtUrl ? 'Algorithmically rendered from coverage' : 'Generated after analysis completes'}</span>
           {retryError && <div data-testid="text-key-art-retry-error" className="mt-1 text-[10px] text-destructive">Key art could not be rendered. Coverage is unchanged.</div>}
         </div>
-        {detail?.keyArtUrl ? <button data-testid="button-open-key-art" onClick={() => window.open(detail.keyArtUrl ?? '', '_blank', 'noopener,noreferrer')} className="flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline">Open <ArrowUpRight size={12} /></button> : detail?.status === 'ready' && detail.report ? <button data-testid="button-retry-key-art" onClick={onRetry} disabled={isRetrying} className="flex h-8 flex-none items-center gap-1.5 rounded-md border border-border bg-card px-3 text-[11px] font-semibold text-primary transition hover:bg-muted disabled:opacity-60">{isRetrying ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}{isRetrying ? 'Retrying…' : 'Retry key art'}</button> : null}
+        {detail?.keyArtUrl ? <button data-testid="button-open-key-art" onClick={() => openKeyArt(detail.keyArtUrl ?? '')} className="flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline">Open image <ArrowUpRight size={12} /></button> : detail?.status === 'ready' && detail.report ? <button data-testid="button-retry-key-art" onClick={onRetry} disabled={isRetrying} className="flex h-8 flex-none items-center gap-1.5 rounded-md border border-border bg-card px-3 text-[11px] font-semibold text-primary transition hover:bg-muted disabled:opacity-60">{isRetrying ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}{isRetrying ? 'Retrying…' : 'Retry key art'}</button> : null}
       </div>
     </section>
   );
