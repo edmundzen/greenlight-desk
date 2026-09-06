@@ -1,2 +1,3 @@
 - [OpenAPI integer compatibility](openapi-zod-compatibility.md) — avoid top-level integer schemas when the workspace Zod generator emits unsupported helpers.
 - [Gemini model availability](gemini-model-availability.md) — verify live model listings; retired IDs and per-model image quotas can differ for the same key.
+- [Opening generated SVG art](svg-key-art-opening.md) — use Blob URLs for separate-tab SVG viewing; raw data URLs may open blank in Edge.
