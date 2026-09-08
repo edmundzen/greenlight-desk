@@ -8,12 +8,16 @@
 import type { ScreenplayAnalyzeInputMimeType } from './screenplayAnalyzeInputMimeType';
 
 export interface ScreenplayAnalyzeInput {
-  /** @minLength 1 */
+  /**
+     * @minLength 1
+     * @maxLength 255
+     */
   fileName: string;
   mimeType: ScreenplayAnalyzeInputMimeType;
   /**
      * Plain text or base64-encoded PDF content
      * @minLength 1
+     * @maxLength 8388608
      */
   content: string;
 }

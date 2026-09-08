@@ -5,37 +5,122 @@ import base64
 import hashlib
 import html
 import json
+import multiprocessing
 import os
 import re
+import resource
 import sqlite3
+import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any, Iterator, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
+MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", "8388608"))
+MAX_DECODED_FILE_BYTES = int(os.getenv("MAX_DECODED_FILE_BYTES", "5242880"))
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "150"))
+MAX_EXTRACTED_TEXT_CHARS = int(os.getenv("MAX_EXTRACTED_TEXT_CHARS", "500000"))
+ANALYSIS_RATE_LIMIT = int(os.getenv("ANALYSIS_RATE_LIMIT", "5"))
+ANALYSIS_RATE_WINDOW_SECONDS = int(os.getenv("ANALYSIS_RATE_WINDOW_SECONDS", "60"))
+MAX_RATE_LIMIT_IDENTITIES = int(os.getenv("MAX_RATE_LIMIT_IDENTITIES", "10000"))
+MAX_USER_ANALYSES = int(os.getenv("MAX_USER_ANALYSES", "1"))
+MAX_GLOBAL_ANALYSES = int(os.getenv("MAX_GLOBAL_ANALYSES", "3"))
+ANALYSIS_TIMEOUT_SECONDS = float(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "180"))
+GEMINI_REQUEST_TIMEOUT_SECONDS = float(
+    os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "60")
+)
+PDF_PARSE_TIMEOUT_SECONDS = float(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "15"))
+PDF_PARSE_MEMORY_BYTES = int(os.getenv("PDF_PARSE_MEMORY_BYTES", "536870912"))
+
+
+class RequestBodyLimitMiddleware:
+    def __init__(self, app: Any, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        content_length = next(
+            (value for key, value in scope.get("headers", []) if key == b"content-length"),
+            None,
+        )
+        if content_length:
+            try:
+                if int(content_length) > self.max_bytes:
+                    response = JSONResponse(
+                        {"detail": "Request body is too large."}, status_code=413
+                    )
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                response = JSONResponse(
+                    {"detail": "Invalid Content-Length header."}, status_code=400
+                )
+                await response(scope, receive, send)
+                return
+
+        received = 0
+
+        async def limited_receive() -> dict[str, Any]:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    raise HTTPException(
+                        status_code=413, detail="Request body is too large."
+                    )
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except HTTPException as exc:
+            response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+            await response(scope, receive, send)
+
+
 app = FastAPI(title="Greenlight Desk API")
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+is_production = os.getenv("NODE_ENV") == "production"
+production_origin = os.getenv("GREENLIGHT_DESK_ORIGIN", "").rstrip("/")
+if is_production and not production_origin:
+    deployed_domain = os.getenv("REPLIT_DOMAINS", "").split(",", 1)[0].strip()
+    if deployed_domain:
+        production_origin = f"https://{deployed_domain}"
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[production_origin] if is_production and production_origin else (
+        ["http://localhost:5173", "http://localhost:3000"]
+    ),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-User-ID"],
 )
 
 DB_PATH = os.getenv("GREENLIGHT_DB_PATH", "greenlight.db")
 TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
 TEXT_FALLBACK_MODEL = os.getenv("GEMINI_TEXT_FALLBACK_MODEL", "gemini-3.5-flash")
 jobs: dict[str, asyncio.Task[None]] = {}
+job_owners: dict[str, str] = {}
+analysis_slots: dict[str, str] = {}
+analysis_slots_lock = threading.Lock()
+rate_limit_events: dict[str, list[float]] = {}
+rate_limit_lock = threading.Lock()
 KEY_ART_CLAIM_TTL = timedelta(minutes=10)
 import logging
+logger = logging.getLogger(__name__)
 
 
 def now() -> str:
@@ -65,6 +150,25 @@ def db() -> Iterator[sqlite3.Connection]:
             )
             """
         )
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(screenplays)")
+        }
+        if "owner_key" not in columns:
+            connection.execute("ALTER TABLE screenplays ADD COLUMN owner_key TEXT")
+        if "submission_hash" not in columns:
+            connection.execute("ALTER TABLE screenplays ADD COLUMN submission_hash TEXT")
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_screenplays_owner_status
+            ON screenplays(owner_key, status)
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_screenplays_submission
+            ON screenplays(owner_key, submission_hash)
+            """
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS key_art_retry_claims (
@@ -83,7 +187,7 @@ def db() -> Iterator[sqlite3.Connection]:
 
 class ScreenplayAnalyzeInput(BaseModel):
     fileName: str = Field(min_length=1, max_length=255)
-    mimeType: Literal["text/plain", "application/pdf"]
+    mimeType: str = Field(min_length=1, max_length=64)
     content: str = Field(min_length=1)
 
 
@@ -134,20 +238,182 @@ def initial_trace() -> list[dict[str, Any]]:
     ]
 
 
-def parse_source(payload: ScreenplayAnalyzeInput) -> tuple[str, int | None]:
+def parse_source(payload: ScreenplayAnalyzeInput) -> tuple[str, int | None, bytes]:
     if payload.mimeType == "text/plain":
+        raw = payload.content.encode("utf-8")
+        if len(raw) > MAX_DECODED_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="Decoded file is too large.")
         text = payload.content
         page_count = max(1, round(len(text) / 3000))
-        return text, page_count
+        if len(text) > MAX_EXTRACTED_TEXT_CHARS:
+            raise HTTPException(status_code=413, detail="Extracted text is too large.")
+        return text, page_count, raw
 
     try:
-        encoded = payload.content.split(",", 1)[1] if payload.content.startswith("data:") else payload.content
+        if payload.content.startswith("data:"):
+            header, encoded = payload.content.split(",", 1)
+            if header.lower() != "data:application/pdf;base64":
+                raise HTTPException(status_code=415, detail="Unsupported PDF data URL.")
+        else:
+            encoded = payload.content
+        if len(encoded) > ((MAX_DECODED_FILE_BYTES + 2) // 3) * 4:
+            raise HTTPException(status_code=413, detail="Decoded file is too large.")
         raw = base64.b64decode(encoded, validate=True)
-        reader = PdfReader(BytesIO(raw))
-        text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
-        return text, len(reader.pages)
+        if len(raw) > MAX_DECODED_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="Decoded file is too large.")
+        if not raw.startswith(b"%PDF-"):
+            raise HTTPException(status_code=400, detail="The uploaded file is not a valid PDF.")
+        text, page_count = parse_pdf_in_subprocess(raw)
+        return text, page_count, raw
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not read PDF: {exc}") from exc
+        logger.warning("Rejected malformed PDF", extra={"error_type": type(exc).__name__})
+        raise HTTPException(status_code=400, detail="Could not read the PDF.") from exc
+
+
+def _pdf_worker(
+    raw: bytes,
+    connection: Any,
+    max_pages: int,
+    max_text_chars: int,
+    memory_bytes: int,
+) -> None:
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        cpu_seconds = max(1, int(PDF_PARSE_TIMEOUT_SECONDS))
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
+        reader = PdfReader(BytesIO(raw), strict=True)
+        page_count = len(reader.pages)
+        if page_count > max_pages:
+            connection.send(("limit", f"PDF exceeds the {max_pages}-page limit."))
+            return
+        parts: list[str] = []
+        text_length = 0
+        for page in reader.pages:
+            part = page.extract_text() or ""
+            text_length += len(part)
+            if text_length > max_text_chars:
+                connection.send(("limit", "Extracted text is too large."))
+                return
+            parts.append(part)
+        connection.send(("ok", "\n\n".join(parts), page_count))
+    except BaseException as exc:
+        connection.send(("error", type(exc).__name__))
+    finally:
+        connection.close()
+
+
+def parse_pdf_in_subprocess(raw: bytes) -> tuple[str, int]:
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_pdf_worker,
+        args=(
+            raw,
+            child,
+            MAX_PDF_PAGES,
+            MAX_EXTRACTED_TEXT_CHARS,
+            PDF_PARSE_MEMORY_BYTES,
+        ),
+    )
+    process.start()
+    child.close()
+    try:
+        if not parent.poll(PDF_PARSE_TIMEOUT_SECONDS):
+            process.terminate()
+            process.join(timeout=1)
+            raise HTTPException(
+                status_code=400, detail="PDF parsing exceeded the safety limit."
+            )
+        result = parent.recv()
+    except EOFError as exc:
+        raise HTTPException(status_code=400, detail="Could not read the PDF.") from exc
+    finally:
+        parent.close()
+        if process.is_alive():
+            process.terminate()
+        process.join(timeout=1)
+    if result[0] == "limit":
+        raise HTTPException(status_code=413, detail=result[1])
+    if result[0] != "ok":
+        raise HTTPException(status_code=400, detail="Could not read the PDF.")
+    return result[1], result[2]
+
+
+def request_ip_owner(request: Request) -> str:
+    # Uvicorn resolves trusted proxy headers into request.client; raw forwarding
+    # headers remain attacker-controlled and must not be used as identity.
+    host = request.client.host if request.client else "unknown"
+    return f"ip:{hashlib.sha256(host.encode()).hexdigest()}"
+
+
+def request_rate_keys(request: Request) -> list[str]:
+    keys = [request_ip_owner(request)]
+    user_id = request.headers.get("x-user-id", "").strip()
+    if user_id:
+        keys.append(f"user:{hashlib.sha256(user_id.encode()).hexdigest()}")
+    return keys
+
+
+def enforce_rate_limit(keys: list[str]) -> None:
+    current = time.monotonic()
+    cutoff = current - ANALYSIS_RATE_WINDOW_SECONDS
+    with rate_limit_lock:
+        if len(rate_limit_events) >= MAX_RATE_LIMIT_IDENTITIES and any(
+            key not in rate_limit_events for key in keys
+        ):
+            expired_keys = [
+                key
+                for key, events in rate_limit_events.items()
+                if not events or max(events) <= cutoff
+            ]
+            for key in expired_keys:
+                rate_limit_events.pop(key, None)
+            if len(rate_limit_events) >= MAX_RATE_LIMIT_IDENTITIES:
+                raise HTTPException(
+                    status_code=429,
+                    detail="The analysis service is busy. Try again later.",
+                )
+        recent_by_key = {
+            key: [event for event in rate_limit_events.get(key, []) if event > cutoff]
+            for key in keys
+        }
+        if any(len(recent) >= ANALYSIS_RATE_LIMIT for recent in recent_by_key.values()):
+            rate_limit_events.update(recent_by_key)
+            raise HTTPException(
+                status_code=429, detail="Too many analysis requests. Try again later."
+            )
+        for key, recent in recent_by_key.items():
+            recent.append(current)
+            rate_limit_events[key] = recent
+
+
+def reserve_analysis_slot(screenplay_id: str, owner_key: str) -> None:
+    with analysis_slots_lock:
+        if screenplay_id in analysis_slots:
+            raise HTTPException(
+                status_code=409, detail="This analysis is already running."
+            )
+        if len(analysis_slots) >= MAX_GLOBAL_ANALYSES:
+            raise HTTPException(
+                status_code=429,
+                detail="The analysis service is busy. Try again later.",
+            )
+        owner_count = sum(
+            existing_owner == owner_key for existing_owner in analysis_slots.values()
+        )
+        if owner_count >= MAX_USER_ANALYSES:
+            raise HTTPException(
+                status_code=429,
+                detail="An analysis is already running for this user.",
+            )
+        analysis_slots[screenplay_id] = owner_key
+
+
+def release_analysis_slot(screenplay_id: str) -> None:
+    with analysis_slots_lock:
+        analysis_slots.pop(screenplay_id, None)
 
 
 def load_record(screenplay_id: str) -> dict[str, Any] | None:
@@ -170,6 +436,8 @@ def load_record(screenplay_id: str) -> dict[str, Any] | None:
     record["pageCount"] = record.pop("page_count")
     record["createdAt"] = record.pop("created_at")
     record["decisionAt"] = record.pop("decision_at")
+    record.pop("owner_key", None)
+    record.pop("submission_hash", None)
     return record
 
 
@@ -329,11 +597,20 @@ def gemini_client() -> genai.Client:
         raise RuntimeError(
             "GEMINI_API_KEY is not configured. Add it in Replit Secrets before analyzing a screenplay."
         )
-    return genai.Client(api_key=api_key)
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=int(GEMINI_REQUEST_TIMEOUT_SECONDS * 1000),
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
 
 
 def key_art_error_message(error: Exception) -> str:
-    return "Key art could not be rendered. Coverage remains ready."
+    detail = str(error)
+    if "429" in detail or "RESOURCE_EXHAUSTED" in detail:
+        return "Gemini image quota is exhausted. Coverage remains ready."
+    return "Key art could not be generated. Coverage remains ready."
 
 
 GENRE_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -518,7 +795,23 @@ SCREENPLAY:
         trace.append(trace_item("Analysis stopped", str(exc), "error"))
         save_trace(screenplay_id, trace, "failed")
     finally:
+        pass
+
+
+async def run_bounded_analysis(screenplay_id: str) -> None:
+    try:
+        await asyncio.wait_for(
+            run_analysis(screenplay_id), timeout=ANALYSIS_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        record = load_record(screenplay_id)
+        trace = record["trace"] if record else []
+        trace.append(trace_item("Analysis stopped", "Analysis timed out.", "error"))
+        save_trace(screenplay_id, trace, "failed")
+    finally:
         jobs.pop(screenplay_id, None)
+        job_owners.pop(screenplay_id, None)
+        release_analysis_slot(screenplay_id)
 
 
 @app.get("/api/healthz")
@@ -550,24 +843,63 @@ async def list_screenplays() -> list[dict[str, Any]]:
 
 
 @app.post("/api/screenplays/analyze", status_code=202)
-async def analyze_screenplay(payload: ScreenplayAnalyzeInput) -> dict[str, str]:
-    source_text, page_count = parse_source(payload)
-    if not source_text.strip():
-        raise HTTPException(status_code=400, detail="The screenplay did not contain readable text.")
+async def analyze_screenplay(
+    payload: ScreenplayAnalyzeInput, request: Request
+) -> dict[str, str]:
+    if payload.mimeType not in {"text/plain", "application/pdf"}:
+        raise HTTPException(status_code=415, detail="Unsupported screenplay MIME type.")
     screenplay_id = str(uuid.uuid4())
+    owner_key = request_ip_owner(request)
+    enforce_rate_limit(request_rate_keys(request))
+    reserve_analysis_slot(screenplay_id, owner_key)
+    try:
+        source_text, page_count, raw = await asyncio.to_thread(parse_source, payload)
+        if not source_text.strip():
+            raise HTTPException(status_code=400, detail="The screenplay did not contain readable text.")
+        submission_hash = hashlib.sha256(
+            payload.mimeType.encode() + b"\0" + raw
+        ).hexdigest()
+    except BaseException:
+        release_analysis_slot(screenplay_id)
+        raise
     trace = initial_trace()
     import json
 
-    with db() as connection:
-        connection.execute(
-            """
-            INSERT INTO screenplays
-            (id, file_name, mime_type, status, page_count, trace_json, created_at, source_text)
-            VALUES (?, ?, ?, 'analyzing', ?, ?, ?, ?)
-            """,
-            (screenplay_id, payload.fileName, payload.mimeType, page_count, json.dumps(trace), now(), source_text),
-        )
-    jobs[screenplay_id] = asyncio.create_task(run_analysis(screenplay_id))
+    try:
+        with db() as connection:
+            duplicate = connection.execute(
+                """
+                SELECT id FROM screenplays
+                WHERE owner_key = ? AND submission_hash = ?
+                LIMIT 1
+                """,
+                (owner_key, submission_hash),
+            ).fetchone()
+            if duplicate:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This screenplay has already been submitted.",
+                )
+            connection.execute(
+                """
+                INSERT INTO screenplays
+                (id, file_name, mime_type, status, page_count, trace_json, created_at,
+                 source_text, owner_key, submission_hash)
+                VALUES (?, ?, ?, 'analyzing', ?, ?, ?, ?, ?, ?)
+                """,
+                (screenplay_id, payload.fileName, payload.mimeType, page_count, json.dumps(trace), now(), source_text, owner_key, submission_hash),
+            )
+    except sqlite3.IntegrityError as exc:
+        release_analysis_slot(screenplay_id)
+        raise HTTPException(
+            status_code=409,
+            detail="This screenplay has already been submitted.",
+        ) from exc
+    except BaseException:
+        release_analysis_slot(screenplay_id)
+        raise
+    job_owners[screenplay_id] = owner_key
+    jobs[screenplay_id] = asyncio.create_task(run_bounded_analysis(screenplay_id))
     return {"screenplayId": screenplay_id, "status": "analyzing"}
 
 
@@ -580,7 +912,9 @@ async def get_screenplay(screenplay_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/screenplays/{screenplay_id}/restart", status_code=202)
-async def restart_screenplay(screenplay_id: str) -> dict[str, str]:
+async def restart_screenplay(
+    screenplay_id: str, request: Request
+) -> dict[str, str]:
     record = load_record(screenplay_id)
     if not record:
         raise HTTPException(status_code=404, detail="Screenplay not found.")
@@ -588,19 +922,43 @@ async def restart_screenplay(screenplay_id: str) -> dict[str, str]:
         raise HTTPException(status_code=409, detail="Only failed analyses can be restarted.")
     if screenplay_id in jobs:
         raise HTTPException(status_code=409, detail="This analysis is already running.")
+    owner_key = request_ip_owner(request)
+    with db() as connection:
+        owner_row = connection.execute(
+            "SELECT owner_key FROM screenplays WHERE id = ?", (screenplay_id,)
+        ).fetchone()
+    if owner_row and owner_row["owner_key"] and owner_row["owner_key"] != owner_key:
+        raise HTTPException(status_code=404, detail="Screenplay not found.")
+    enforce_rate_limit(request_rate_keys(request))
+    reserve_analysis_slot(screenplay_id, owner_key)
 
     import json
 
-    update_record(
-        screenplay_id,
-        status="analyzing",
-        report=None,
-        keyArtUrl=None,
-        decision=None,
-        decision_at=None,
-    )
-    save_trace(screenplay_id, initial_trace(), "analyzing")
-    jobs[screenplay_id] = asyncio.create_task(run_analysis(screenplay_id))
+    try:
+        with db() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE screenplays
+                SET status = 'analyzing',
+                    report_json = NULL,
+                    key_art_url = NULL,
+                    decision = NULL,
+                    decision_at = NULL,
+                    owner_key = ?,
+                    trace_json = ?
+                WHERE id = ? AND status = 'failed'
+                """,
+                (owner_key, json.dumps(initial_trace()), screenplay_id),
+            )
+            if cursor.rowcount != 1:
+                raise HTTPException(
+                    status_code=409, detail="This analysis is already running."
+                )
+    except BaseException:
+        release_analysis_slot(screenplay_id)
+        raise
+    job_owners[screenplay_id] = owner_key
+    jobs[screenplay_id] = asyncio.create_task(run_bounded_analysis(screenplay_id))
     return {"screenplayId": screenplay_id, "status": "analyzing"}
 
 
@@ -658,11 +1016,6 @@ async def retry_screenplay_key_art(screenplay_id: str) -> dict[str, Any]:
         try:
             await generate_key_art(
                 screenplay_id, row["source_text"] if row else "", record["report"]
-            )
-            replace_trace_event(
-                screenplay_id,
-                "Generated key art",
-                "Rendered a deterministic visual direction from coverage genre and tone",
             )
         except Exception as exc:
             if isinstance(exc, HTTPException):

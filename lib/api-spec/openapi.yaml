@@ -60,6 +60,14 @@ paths:
                 $ref: "#/components/schemas/AnalysisJob"
         "400":
           description: Invalid screenplay input
+        "409":
+          description: Duplicate screenplay submission
+        "413":
+          description: Request, decoded file, page count, or extracted text exceeds a limit
+        "415":
+          description: Unsupported media type
+        "429":
+          description: Request rate or analysis concurrency limit exceeded
   /screenplays/{screenplayId}:
     get:
       operationId: getScreenplay
@@ -173,6 +181,7 @@ components:
         fileName:
           type: string
           minLength: 1
+          maxLength: 255
         mimeType:
           type: string
           enum: [text/plain, application/pdf]
@@ -180,6 +189,7 @@ components:
           type: string
           description: Plain text or base64-encoded PDF content
           minLength: 1
+          maxLength: 8388608
     AnalysisJob:
       type: object
       required: [screenplayId, status]

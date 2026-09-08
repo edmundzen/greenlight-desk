@@ -33,14 +33,16 @@ export const ListScreenplaysResponse = zod.array(ListScreenplaysResponseItem)
 /**
  * @summary Analyze a screenplay with Gemini
  */
+export const analyzeScreenplayBodyFileNameMax = 255;
 
+export const analyzeScreenplayBodyContentMax = 8388608;
 
 
 
 export const AnalyzeScreenplayBody = zod.object({
-  "fileName": zod.string().min(1),
+  "fileName": zod.string().min(1).max(analyzeScreenplayBodyFileNameMax),
   "mimeType": zod.enum(['text/plain', 'application/pdf']),
-  "content": zod.string().min(1).describe('Plain text or base64-encoded PDF content')
+  "content": zod.string().min(1).max(analyzeScreenplayBodyContentMax).describe('Plain text or base64-encoded PDF content')
 })
 
 export const AnalyzeScreenplayResponse = zod.object({
